@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 import os, sys, argparse, requests, csv
 from datetime import datetime, timezone
-
 # Python 3.8 compatibility for timezones
 try:
     from zoneinfo import ZoneInfo          # Python 3.9+
 except ImportError:
     from backports.zoneinfo import ZoneInfo  # pip install --user backports.zoneinfo
-
 def load_env(path=".env"):
+    """Loads environment variables from a .env file."""
     if not os.path.exists(path):
         return
     with open(path, "r", encoding="utf-8") as f:
@@ -19,29 +18,28 @@ def load_env(path=".env"):
             if "=" in line:
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
-
 load_env()
 API_BASE = os.environ.get("FITBIT_API_BASE", "https://api.fitbit.com")
-
 def get_token(cli_token=None):
+    """Gets the API token from CLI args or environment variables."""
     token = cli_token or os.environ.get("ACCESS_TOKEN")
     if not token:
         print("ERROR: ACCESS_TOKEN not found. Pass --token or set ACCESS_TOKEN in .env", file=sys.stderr)
         sys.exit(1)
     return token.strip()
-
 def headers(token):
+    """Constructs the authorization headers."""
     return {"Authorization": f"Bearer {token}"}
-
 def assert_token(token):
+    """Verifies that the token is valid by making a test API call."""
     url = f"{API_BASE}/1/user/-/profile.json"
     r = requests.get(url, headers=headers(token), timeout=20)
     if r.status_code == 401:
         raise SystemExit(f"401 Unauthorized on /profile. Token invalid/expired.\nServer says: {r.text}")
     if r.status_code >= 400:
         raise SystemExit(f"{r.status_code} error on /profile.\nServer says: {r.text}")
-
 def fetch_hr(token, date_str, level="1sec"):
+    """Fetches heart rate data for a given date."""
     url = f"{API_BASE}/1/user/-/activities/heart/date/{date_str}/1d/{level}.json"
     r = requests.get(url, headers=headers(token), timeout=30)
     if r.status_code == 401:
@@ -56,50 +54,55 @@ def fetch_hr(token, date_str, level="1sec"):
     if r.status_code >= 400:
         raise SystemExit(f"{r.status_code} error on {url}\nServer says: {r.text}")
     return r.json(), "1sec"
-
 def parse_args():
+    """Parses command-line arguments."""
     ap = argparse.ArgumentParser(description="Fetch Fitbit intraday heart rate and save CSV.")
     ap.add_argument("--date", required=True, help="Date in YYYY-MM-DD (the experiment day).")
     ap.add_argument("--tz", default=None, help="IANA timezone (e.g., Asia/Tokyo). Defaults to system tz.")
     ap.add_argument("--out", default=None, help="Output CSV (default: hr_<date>.csv).")
     ap.add_argument("--token", default=None, help="Access token override (else use ACCESS_TOKEN from .env).")
     return ap.parse_args()
-
 def main():
+    """Main execution function."""
     args = parse_args()
     token = get_token(args.token)
     out_path = args.out or f"hr_{args.date}.csv"
     tz = ZoneInfo(args.tz) if args.tz else datetime.now().astimezone().tzinfo
-
     # Verify token
+    print("Verifying token...")
     assert_token(token)
-
+    print("Token is valid.")
     # Fetch HR data
+    print(f"Fetching heart rate data for {args.date}...")
     data, level = fetch_hr(token, args.date, "1sec")
     intraday = data.get("activities-heart-intraday", {}).get("dataset", [])
-
-    # Build rows
+    if not intraday:
+        print("No heart rate data found for this date.")
+        return
+    # Build rows with corrected timezone logic
     rows = []
     for d in intraday:
         t = d["time"]  # "HH:MM:SS" or "HH:MM"
         if len(t) == 5:
             t += ":00"
-        dt_utc = datetime.fromisoformat(args.date + "T" + t).replace(tzinfo=timezone.utc)
-        dt_local = dt_utc.astimezone(tz)
+        # --- CORRECTED TIMEZONE LOGIC ---
+        # 1. Create a naive datetime object from the date and time string.
+        naive_dt = datetime.fromisoformat(f"{args.date}T{t}")
+        # 2. Localize the naive datetime to the user-specified timezone. This is the correct local time.
+        dt_local = naive_dt.replace(tzinfo=tz)
+        # 3. Convert the correct local time to UTC to populate the UTC timestamp column.
+        dt_utc = dt_local.astimezone(timezone.utc)
         rows.append({
             "timestamp_local": dt_local.isoformat(),
             "timestamp_utc": dt_utc.isoformat(),
             "bpm": d["value"],
             "source": level,
         })
-
     # Save CSV
     with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["timestamp_local","timestamp_utc","bpm","source"])
+        w = csv.DictWriter(f, fieldnames=["timestamp_local", "timestamp_utc", "bpm", "source"])
         w.writeheader()
         w.writerows(rows)
-
     print(f"Wrote {len(rows)} rows to {out_path} (resolution: {level})")
-
 if __name__ == "__main__":
     main()
