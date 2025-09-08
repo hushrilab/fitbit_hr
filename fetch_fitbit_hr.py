@@ -61,6 +61,7 @@ def parse_args():
     ap.add_argument("--tz", default=None, help="IANA timezone (e.g., Asia/Tokyo). Defaults to system tz.")
     ap.add_argument("--out", default=None, help="Output CSV (default: hr_<date>.csv).")
     ap.add_argument("--token", default=None, help="Access token override (else use ACCESS_TOKEN from .env).")
+    ap.add_argument("--resample", default=None, help="If set to nan, will fill NAN when there are no readings, if set to ffill, will interpolate and use interpolated numbers.")
     return ap.parse_args()
 def main():
     """Main execution function."""
@@ -75,29 +76,63 @@ def main():
     # Fetch HR data
     print(f"Fetching heart rate data for {args.date}...")
     data, level = fetch_hr(token, args.date, "1sec")
+    # Build a dict of epoch-second -> bpm (as you already do)
     intraday = data.get("activities-heart-intraday", {}).get("dataset", [])
     if not intraday:
         print("No heart rate data found for this date.")
         return
-    # Build rows with corrected timezone logic
-    rows = []
+
+    samples = {}
     for d in intraday:
-        t = d["time"]  # "HH:MM:SS" or "HH:MM"
+        t = d["time"]  # "HH:MM[:SS]"
         if len(t) == 5:
             t += ":00"
-        # --- CORRECTED TIMEZONE LOGIC ---
-        # 1. Create a naive datetime object from the date and time string.
         naive_dt = datetime.fromisoformat(f"{args.date}T{t}")
-        # 2. Localize the naive datetime to the user-specified timezone. This is the correct local time.
         dt_local = naive_dt.replace(tzinfo=tz)
-        # 3. Convert the correct local time to UTC to populate the UTC timestamp column.
-        dt_utc = dt_local.astimezone(timezone.utc)
-        rows.append({
-            "timestamp_local": dt_local.isoformat(),
-            "timestamp_utc": dt_utc.isoformat(),
-            "bpm": d["value"],
-            "source": level,
-        })
+        samples[int(dt_local.timestamp())] = d["value"]
+
+    rows = []
+    prev_epoch = None
+
+    if args.resample == None:
+        # Keep native cadence; 'source' = seconds since previous sample
+        for epoch in sorted(samples.keys()):
+            dt_local = datetime.fromtimestamp(epoch, tz)
+            dt_utc   = dt_local.astimezone(timezone.utc)
+            interval = "" if prev_epoch is None else (epoch - prev_epoch)
+            rows.append({
+                "timestamp_local": dt_local.isoformat(),
+                "timestamp_utc": dt_utc.isoformat(),
+                "bpm": samples[epoch],
+                "source": interval,   # e.g., 5, 10, 12 ... (seconds)
+            })
+            prev_epoch = epoch
+    else:
+        # Resampled strict 1s grid; 'source' = seconds since previous row (always 1)
+        start = datetime.fromisoformat(f"{args.date}T00:00:00").replace(tzinfo=tz)
+        end   = datetime.fromisoformat(f"{args.date}T23:59:59").replace(tzinfo=tz)
+        last_val = None
+        epoch = int(start.timestamp())
+        end_epoch = int(end.timestamp())
+        while epoch <= end_epoch:
+            dt_local = datetime.fromtimestamp(epoch, tz)
+            dt_utc   = dt_local.astimezone(timezone.utc)
+            val = samples.get(epoch, None)
+            if val is None:
+                if args.resample == "ffill" and last_val is not None:
+                    val = last_val
+            else:
+                last_val = val
+            interval = "" if prev_epoch is None else (epoch - prev_epoch)
+            rows.append({
+                "timestamp_local": dt_local.isoformat(),
+                "timestamp_utc": dt_utc.isoformat(),
+                "bpm": "" if val is None else val,
+                "source": interval,   # will be 1 on a strict 1s grid
+            })
+            prev_epoch = epoch
+            epoch += 1
+
     # Save CSV
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["timestamp_local", "timestamp_utc", "bpm", "source"])
