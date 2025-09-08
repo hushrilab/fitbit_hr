@@ -8,7 +8,7 @@ This starter kit shows how to get **timestamped heart-rate data** from a Fitbit 
 ---
 
 ## ✨ Features
-- Exports **1-second intraday heart rate** (for Personal apps on your own account)  
+- Exports **1-second intraday heart rate** (for Personal apps on your own account), **Note** the actual resolution is not 1-second, because Fitbit only sends one reading every 5 to 10 sec, see the resample option in the script.
 - Falls back to **1-minute** resolution if 1-second not available  
 - Outputs both **UTC** and **local timezone** timestamps  
 - Simple command-line usage  
@@ -74,12 +74,14 @@ python3 fetch_fitbit_hr.py --date 2025-09-01 --tz Asia/Tokyo --out hr_2025-09-01
 
 - `--token YOURTOKEN` : Override token (else it uses the one in venv, if using venv)
 
+- `--resample OPTION` : by default it uses the Fitbit returned reading rate, `nan` if you want to have 1 sec resolution and fill with NAN when there are no readings, `ffill` if you want to interpolate and upsample to 1 sec resolution
+
 ### Output format
 CSV columns:
 - `timestamp_local`: Local time
 - `timestamp_utc`: UTC time
 - `bpm`: heart rate in beats per minute
-- `source`: resolution (should be 1 min or 1 sec)
+- `source`: resolution (calculated based on the intervals between readings)
 
 ## 🔧 Troubleshooting
 
